@@ -1,0 +1,38 @@
+# --- Python / Django ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+db.sqlite3
+db.sqlite3-journal
+media/
+static_root/
+staticfiles/
+
+# --- Virtual Environment ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Environment Variables (CRITICAL for Security) ---
+.env
+.env.local
+.env.dev
+.env.prod
+
+# --- Databases (PostgreSQL logs or local exports) ---
+*.sql
+*.dump
+
+# --- Editors and IDEs ---
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# --- macOS System Files ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
