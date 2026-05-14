@@ -142,16 +142,6 @@ class User(AbstractUser):
             return TimeSlot.generate_slots(court_instance, start_time, end_time, date)
         
         return 'Permission denied'
-
-
-
-    def search_futsals(self, location, city_area):
-        if self.has_permission('search_futsal'):
-
-            from bookings.models import FutsalCourt
-            return FutsalCourt.search_location(location, city_area)
-        
-        return 'Permission denied'
     
 
 
@@ -165,22 +155,30 @@ class User(AbstractUser):
 
     
 
-    # def generate_annual_daily_reports(self):
-    #     if self.has_permission('generate_reports'):
+    def generate_annual_daily_reports(self):
+        if self.has_permission('generate_reports'):
 
-    #         from bookings.models import Payment
+            from bookings.models import Payment
 
-    #         now = timezone.now()
-    #         one_year_ago = now - timedelta(days=365)
+            now = timezone.now()
+            one_year_ago = now - timedelta(days=365)
 
-    #         payments = Payment.objects.filter(
-    #             payment_date__gte=one_year_ago,
-    #             payment_date__hour__gte=6,
-    #             payment_date__hour__gte=22,
-    #             payment_status = 'completed'
-    #         )
-            
+            payments = Payment.objects.filter(
+                payment_date__gte=one_year_ago,
+                payment_date__hour__gte=6,
+                payment_date__hour__gte=22,
+                payment_status = 'completed'
+             )
+            pass
 
+    
+    def search_futsals(self, location, city_area):
+        if self.has_permission('search_futsal'):
+
+            from bookings.models import FutsalCourt
+            return FutsalCourt.search_location(location, city_area)
+        
+        return 'Permission denied'
 
 
 
@@ -189,15 +187,38 @@ class User(AbstractUser):
         if self.has_permission('create_bookings'):
 
             from bookings.models import TimeSlot, Booking, BookingSlot
-            valid_slot_number = TimeSlot.objects.filter(id__in=timeslots_id).count()
+            free_slot = TimeSlot.objects.filter(id__in=timeslots_id).count()
 
-            if valid_slot_number != len(timeslots_id):
+            if free_slot != len(timeslots_id):
                 return 'This slots is not available'
             
             new_booking = Booking.objects.create(user=self)
             return BookingSlot.multiple_booking(new_booking, timeslots_id)
         
         return 'Permissions denied'
+    
+
+    def view_bookings(self):
+        pass
+
+    def check_time_available(self):
+        pass
+
+
+    def view_futsal_courts(self):
+        pass
+    
+
+    def select_time_slot(self):
+        pass
+
+    def create_booking(self):
+        pass
+
+
+    
+
+  
 
         
 
@@ -215,7 +236,9 @@ class User(AbstractUser):
         
         return 'Permission denied'
 
-
+    
+    def cancel_booking(self):
+        pass
 
     
 

@@ -1,7 +1,7 @@
 from django.db import models, transaction
 from django.conf import settings
 from django.db.models import Q
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime # datetime standard Python library for handling time.
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
 from django.utils import timezone
@@ -14,12 +14,12 @@ class FutsalCourt(models.Model):
     base_price = models.DecimalField(max_digits=10, decimal_places=2, help_text='morning/mid/night rate')
     surface_type = models.CharField(max_length=50, help_text='5A, 7A side futsal')
 
-    COURT_STATUS = [
+    status = [
         ('open', 'OPEN'),
         ('maintenance', 'MAINTENANCE'),
         ('closed', 'CLOSED')
     ]
-    status = models.CharField(max_length=100, choices=COURT_STATUS, default='open')
+    court_status = models.CharField(max_length=100, choices=status, default='open')
 
     city_area = models.CharField(max_length=50, help_text='Kathmandu, Lalitpur, Bhaktapur')
     phone_number = models.CharField(max_length=10)
@@ -38,14 +38,14 @@ class FutsalCourt(models.Model):
      
     def view_details(self):
         return {
-           'Futsal name': self.court,
-             'Location': self.location,
-             'city_area': self.city_area,
-             'Base price': self.base_price,
-             'Surface type': self.surface_type,
-             'status': self.status,
-             'Phone number': self.phone_number
-            }
+            'Futsal name': self.court,
+            'Location': self.location,
+            'city_area': self.city_area,
+            'Base price': self.base_price,
+            'Surface type': self.surface_type,
+            'status': self.court_status,
+            'Phone number': self.phone_number
+        }
     
 
     @classmethod
@@ -80,33 +80,35 @@ class TimeSlot(models.Model):
             book_date = timezone.localdate()
         
         # make_aware is the process of taking a "dumb" time and making it a "smart" time.
-        current_dt = timezone.make_aware(datetime.combine(book_date, start_time))
+        start_dt = timezone.make_aware(datetime.combine(book_date, start_time))
         end_dt = timezone.make_aware(datetime.combine(book_date, end_time))
+        # combine is a function inside the datetime library.
 
         slot_list = []
         
+        # time-slicing algorithm
         with transaction.atomic():
-            while current_dt < end_dt:
-                next_slot = current_dt + timedelta(hours=duration_hours)
+            while start_dt < end_dt:
+                next_slot = start_dt + timedelta(hours=duration_hours)
 
                 if next_slot > end_dt:
                     break
 
                 slots = cls.objects.create(
                     court = court_instance,
-                    start_time = current_dt.time(),
-                    end_time = next_slot.time(),
+                    start_time = start_dt,
+                    end_time = next_slot,
                     date = book_date,
                     is_available = True
                 )
  
                 slot_list.append(slots)
-                current_dt = next_slot
+                start_dt = next_slot
         
         return f'{len(slot_list)}'
     
     
-    # overlap prevention
+    # overlap (double booking) prevention 
     def lock_slot(self):
         if self.is_available:
             self.is_available = False
@@ -120,7 +122,7 @@ class TimeSlot(models.Model):
 
     
     @classmethod
-    def get_slot_time(cls, court_id):
+    def get_court_time(cls, court_id):
         return cls.objects.filter(court_id=court_id)
     
 
@@ -131,27 +133,27 @@ class Booking(models.Model):
     booking_date = models.DateTimeField(auto_now_add=True)
     total_booking_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     
-    STATUS_CHOICES = [
+    status = [
         ('pending', 'PENDING'),
         ('confirmed', 'CONFIRMED'),
         ('cancelled', 'CANCELLED')
     ]
 
-    booking_status = models.CharField(max_length=20, default='pending')
+    booking_status = models.CharField(max_length=20, choices=status ,default='pending')
 
     def __str__(self):
         return f'Booking {self.id} by {self.user.username}'
     
     
     def create_booking(self):
-        self.booking_status = 'PENDING' # pending: logic side, We have the record, but don't let the user play yet because they haven't paid
+        self.booking_status = 'pending' # pending: logic side, We have the record, but don't let the user play yet because they haven't paid
         self.save()
         return f'Booking for {self.user.username} is created'
     
     
     def confirm_booking(self):
-        if self.booking_status != 'CANCELLED':
-            self.booking_status = 'CONFIRMED'
+        if self.booking_status != 'cancelled':
+            self.booking_status = 'confirmed'
             self.save()
             return True
         return False
@@ -174,12 +176,12 @@ class Booking(models.Model):
     
     def view_bookings(self):
         return {
-            'ID' : self.id,
-            'USER': self.user.username,
-            'DATE': self.booking_date.strftime('%Y-%m-%d %H-%M'),
-            # strftime: "String Format Time." It is a Python function that takes a complex "Date Object" (which the computer understands) and turns it into a "String" (which humans and React understand).
-            'TOTAL':self.total_booking_price,
-            'STATUS': self.booking_status
+            'id' : self.id,
+            'user': self.user.username,
+            'date': self.booking_date.strftime('%m-%d %H'),
+            # strftime: "String Format Time." It is a Python function that takes date (which the computer understands) and turns it into a "String" (which humans and React understand).
+            'total':self.total_booking_price,
+            'status': self.status
         }
 
 
@@ -191,7 +193,7 @@ class BookingSlot(models.Model):
       
 
     # overlap prevention
-    def validate_slots(self):
+    def available_slots(self):
         if not self.timeslot.is_available:
             raise ValidationError(f'Slots {self.timeslot} is already booked')
         return True
@@ -212,7 +214,7 @@ class BookingSlot(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.id:
-            self.validate_slots()
+            self.available_slots()
 
             if not self.unit_price:
                 self.unit_price = self.calculate_slot_price()
@@ -220,7 +222,7 @@ class BookingSlot(models.Model):
             self.timeslot.lock_slot()
         
         super().save(*args, **kwargs)
-
+        
         self.booking.update_total_price()
 
 
@@ -248,29 +250,29 @@ class BookingSlot(models.Model):
 
 
 class Payment(models.Model):
-    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name='payment')
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     payment_date = models.DateTimeField(auto_now_add=True)
 
-    PAYMENT_METHODS = [
+    methods = [
         ('esewa', 'ESEWA'),
         ('khalti', 'KHALTI'),
         ('bank', 'BANK'),
         ('cash', 'CASH')
     ]
 
-    payment_methods = models.CharField(max_length=50, choices=PAYMENT_METHODS)
+    payment_methods = models.CharField(max_length=50, choices=methods)
 
-    PAYMENT_STATUS = [
+    status = [
         ('pending', 'PENDING'),
         ('completed', 'COMPLETED'),
         ('failed', 'FAILED')
     ]
 
-    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
+    payment_status = models.CharField(max_length=20, choices=status, default='pending')
 
     # hashing logic, unique=True, from same esewa id cannot used twice
-    TransactionHash = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    transaction_hash = models.CharField(max_length=100, unique=True, null=True, blank=True)
 
 
     def __str__(self):
@@ -285,7 +287,7 @@ class Payment(models.Model):
     # hashing logic 
     def confirm_payment(self, txn_hash):
         self.payment_status = 'completed'
-        self.TransactionHash = txn_hash
+        self.transaction_hash = txn_hash
         self.save()
 
         self.booking.booking_status = 'confirmed'
