@@ -1,6 +1,8 @@
 from django.contrib import admin
 from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, Payment
 
+
+# Register your other models as usual
 admin.site.register(FutsalCourt)
 admin.site.register(TimeSlot)
 admin.site.register(Booking)

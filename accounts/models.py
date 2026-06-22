@@ -2,18 +2,20 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
 from datetime import timedelta
-from django.db.models import Sum, Count
+from django.core.exceptions import PermissionDenied
+from django.http import Http404
 
 
 
 ADMIN_PERMISSIONS = [
-    'assign_roles', 'manage_users', 'manage_futsal_courts', 'manage_time_slots', 'search_futsals',
-    'monitor_payments','generate_reports', 'view_futsal_courts', 'check_time_available', 'book_slots'
+    'assign_roles', 'manage_users', 'manage_futsal_courts', 'manage_time_slots', 'monitor_payments', 'search_futsals',
+    'generate_reports', 'view_futsal_courts', 'check_time_available', 'create_booking', 'view_bookings', 'select_time_slot',
+    'cancel_booking'
 ]
 
 PLAYER_PERMISSIONS = [
     'view_futsal_courts', 'search_futsals', 'check_time_available', 'select_time_slot',
-    'create_booking','book_slots' 'view_bookings', 'make_payment', 'cancel_booking'
+    'create_booking', 'view_bookings', 'make_payment', 'cancel_booking'
 ]
 
 
@@ -35,8 +37,6 @@ class Role(models.Model):
         return[]
 
 
-
-
 class User(AbstractUser):
     phone_number = models.CharField(max_length=10, unique=True, null=False, blank=False)
     role = models.ForeignKey(Role, on_delete=models.SET_NULL, blank=True, null=True, related_name='users')
@@ -56,33 +56,35 @@ class User(AbstractUser):
     
 
 
-
     def save(self, *args, **kwargs):
         if not self.role:
             try:
-                self.role = Role.objects.get(role_name='Player')
+                self.role = Role.objects.get(role_name__iexact='Player')
             except Role.DoesNotExist:
-                pass
+                self.role = Role.objects.create(
+                    role_name = 'Player',
+                    permission = 'Default player permission'
+                )
         
         super().save(*args, **kwargs)
 
 
 
-    def assign_roles(self, get_user_id, new_role_id):
+    def assign_roles(self, get_user_id, get_role_id):
 
         if self.has_permission('assign_roles'):
             
             from .models import Role
             try:
                 get_user = User.objects.get(id=get_user_id)
-                get_role = Role.objects.get(id=new_role_id)
+                get_role = Role.objects.get(id=get_role_id)
 
                 get_user.role = get_role
                 get_user.save()
                 return f'{get_user.username} player is {get_role.role_name} now..'
             
             except (User.DoesNotExist, Role.DoesNotExist):
-                return 'User or Role not found'
+                return 'User and Role not found'
         
         return 'Permission denied'
     
@@ -103,12 +105,7 @@ class User(AbstractUser):
                     get_user.is_active = True
                     get_user.save()
                     return f'{get_user.username} has been activated.'
-                
-                elif action == 'deleted':
-                    username = get_user.username
-                    get_user.delete()
-                    return f'{username} player has been permanently deleted'
-                
+            
                 return 'Invalid action provided'
             
             except User.DoesNotExist:
@@ -120,30 +117,57 @@ class User(AbstractUser):
 
     def manage_futsal_courts(self, action, court_id=None, **kwargs):
 
-        if self.has_permission('manage_futsal_courts'):
+        if not self.has_permission('manage_futsal_courts'):
+            raise PermissionDenied("You don't have permission to manage futsal courts.")
 
-            from bookings.models import FutsalCourt
+        from bookings.models import FutsalCourt
 
-            if action == 'create':
-                return FutsalCourt.objects.create(**kwargs)
+        if action == 'create':
+            return FutsalCourt.objects.create(**kwargs)
+        
             
-            if action == 'update' and court_id:
+        if action == 'update' and court_id:
+            try:
                 court = FutsalCourt.objects.get(id=court_id)
-                return court.updated_details(**kwargs)
+                court.update_details(**kwargs)
+                return court
+            
+            except FutsalCourt.DoesNotExist:
+                raise Http404("court not found")
+            
+        if action == 'delete' and court_id:
+            try:
+                court = FutsalCourt.objects.get(id=court_id)
+                court_name = court.court_name
+                court.delete()
+                return f"Court '{court_name}' (id: {court_id}) deleted successfully"
+                    
+            except FutsalCourt.DoesNotExist:
+                raise Http404("court not found")
+            
+        raise ValueError("Invalid action")
         
-        return 'Permission denied'
+        
     
 
 
-    def manage_time_slots(self, court_instance, start_time, end_time, date=None):
-        if self.has_permission('manage_time_slots'):
-
-            from bookings.models import TimeSlot
-            return TimeSlot.generate_slots(court_instance, start_time, end_time, date)
+    def manage_time_slots(self, court_instance, start_time, end_time, start_date=None, end_date=None, duration_hours=1):
         
-        return 'Permission denied'
-    
+        from django.core.exceptions import PermissionDenied
 
+        if not self.has_permission('manage_time_slots'):
+            raise PermissionDenied("You do not have access to manage time slots.")
+
+        from bookings.models import TimeSlot        
+        return TimeSlot.generate_slots(
+            court_instance=court_instance,
+            start_time=start_time,
+            end_time=end_time,
+            start_date=start_date,
+            end_date=end_date,
+            duration_hours=duration_hours
+        )
+    
 
     def monitor_payments(self):
         if self.has_permission('monitor_payments'):
@@ -155,7 +179,7 @@ class User(AbstractUser):
 
     
 
-    def generate_annual_daily_reports(self):
+    def generate_reports(self):
         if self.has_permission('generate_reports'):
 
             from bookings.models import Payment
@@ -166,63 +190,70 @@ class User(AbstractUser):
             payments = Payment.objects.filter(
                 payment_date__gte=one_year_ago,
                 payment_date__hour__gte=6,
-                payment_date__hour__gte=22,
+                payment_date__hour__lte=22,
                 payment_status = 'completed'
              )
             pass
 
     
     def search_futsals(self, location, city_area):
-        if self.has_permission('search_futsal'):
+        from django.core.exceptions import PermissionDenied
 
-            from bookings.models import FutsalCourt
-            return FutsalCourt.search_location(location, city_area)
+        if not self.has_permission('search_futsals'):
+            raise PermissionDenied("Permission denied: You do not have access to search futsals.")
+
+        from bookings.models import FutsalCourt
+        return FutsalCourt.search_location(location, city_area)
+        
+
+
+
+    def view_bookings(self):
+        if self.has_permission('view_bookings'):
+            
+            return [booking.view_bookings() for booking in self.bookings.all()]
+        
+        return 'Permission denied'
+        
+        
+
+    def check_time_available(self, slots):
+        if self.has_permission('check_time_available'):
+            
+            return slots.check_available_time()
         
         return 'Permission denied'
 
 
-
-
-    def book_slots(self, timeslots_id):
-        if self.has_permission('create_bookings'):
-
-            from bookings.models import TimeSlot, Booking, BookingSlot
-            free_slot = TimeSlot.objects.filter(id__in=timeslots_id).count()
-
-            if free_slot != len(timeslots_id):
-                return 'This slots is not available'
-            
-            new_booking = Booking.objects.create(user=self)
-            return BookingSlot.multiple_booking(new_booking, timeslots_id)
-        
-        return 'Permissions denied'
-    
-
-    def view_bookings(self):
-        pass
-
-    def check_time_available(self):
-        pass
-
-
     def view_futsal_courts(self):
-        pass
+        if self.has_permission('view_futsal_courts'):
+
+            from bookings.models import FutsalCourt
+            return FutsalCourt.objects.all()
+        
+        return 'Permission denied'
     
 
-    def select_time_slot(self):
-        pass
+    def select_time_slot(self, booking_instance, timeslots_id):
+        if self.has_permission('select_time_slot'):
+
+            from bookings.models import BookingSlot
+            return BookingSlot.multiple_booking(booking_instance, timeslots_id)
+        
+        return 'Permission denied'
+
 
     def create_booking(self):
-        pass
-
-
-    
-
-  
-
+        if self.has_permission('create_booking'):
+            
+            from bookings.models import Booking
+            new_booking = Booking(user=self)
+            return new_booking.create_booking()
         
+        return 'Permission denied'
 
-    def make_payment(self, booking_instance, amount, method):
+
+    def make_payment(self, booking_instance, amount, methods):
 
         if self.has_permission('make_payment'):
 
@@ -230,15 +261,19 @@ class User(AbstractUser):
             payment = Payment.objects.create(
                 booking=booking_instance,
                 amount=amount,
-                PaymentMethod=method
+                payment_methods=methods
             )
             return payment.initial_payment()
         
         return 'Permission denied'
 
     
-    def cancel_booking(self):
-        pass
+    def cancel_booking(self, booking_instance):
+        if self.has_permission('cancel_booking'):
+
+            return booking_instance.cancel_booking()
+        
+        return 'Permission denied'
 
     
 

@@ -5,40 +5,42 @@ from datetime import timedelta, datetime # datetime standard Python library for 
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
 from django.utils import timezone
+from django.contrib.auth import get_user_model
+User = get_user_model()
 
 
 
 class FutsalCourt(models.Model):
-    court = models.CharField(max_length=50)
+    court_name = models.CharField(max_length=50)
     location = models.CharField(max_length=50, help_text='Shantinagar, Kathmandu')
     base_price = models.DecimalField(max_digits=10, decimal_places=2, help_text='morning/mid/night rate')
     surface_type = models.CharField(max_length=50, help_text='5A, 7A side futsal')
-
+    # image = models.ImageField(upload_to='futsal_image/', null=True, blank=True)
+  
     status = [
-        ('open', 'OPEN'),
-        ('maintenance', 'MAINTENANCE'),
-        ('closed', 'CLOSED')
+        ('open', 'Open'),
+        ('maintenance', 'Maintenance'),
+        ('closed', 'Closed'),
+        ('school', 'School events'),
+        ('booked', 'tournament events is going on')
     ]
     court_status = models.CharField(max_length=100, choices=status, default='open')
-
-    city_area = models.CharField(max_length=50, help_text='Kathmandu, Lalitpur, Bhaktapur')
+    city_area = models.CharField(max_length=30, help_text='Kathmandu, Lalitpur, Bhaktapur')
     phone_number = models.CharField(max_length=10)
 
     def __str__(self):
-        return f'{self.court}, {self.city_area}'
+        return f'{self.court_name}, {self.city_area}'
     
-
     def update_details(self, **kwargs):
         for field, value in kwargs.items():
             setattr(self, field, value)
-            self.save()
             
+        self.save()  
         return f'Court {self.id} updated successfully'
 
-     
     def view_details(self):
         return {
-            'Futsal name': self.court,
+            'Futsal name': self.court_name,
             'Location': self.location,
             'city_area': self.city_area,
             'Base price': self.base_price,
@@ -46,17 +48,26 @@ class FutsalCourt(models.Model):
             'status': self.court_status,
             'Phone number': self.phone_number
         }
-    
 
     @classmethod
     def search_location(cls, location, city_area):
-        return cls.objects.filter(
-            Q(court__icontains=location) |
-            Q(city_area__icontains=city_area) 
-        )
-
-
-
+        queryset = cls.objects.all()
+        
+        if location and city_area:
+            return cls.objects.filter(
+                Q(location__icontains=location) |
+                Q(city_area__icontains=city_area) 
+            )
+        
+        if location:
+            return queryset.filter(location__icontains=location)
+        
+        if city_area:
+            return queryset.filter(city_area__icontains=city_area)
+        
+        return queryset
+        
+        
 
 class TimeSlot(models.Model):
     court = models.ForeignKey(FutsalCourt, on_delete=models.CASCADE, related_name='timeslots')
@@ -64,9 +75,10 @@ class TimeSlot(models.Model):
     end_time = models.TimeField()
     date = models.DateField(null=True, blank=True)
     is_available = models.BooleanField(default=True)
+    
 
     def __str__(self):
-        return f"{self.court.court} futsal : {self.start_time.strftime('%I: %M: %p')} - {self.end_time.strftime('%I: %M: %p')}"
+        return f"{self.court.court_name} : {self.start_time.strftime('%I: %M: %p')} - {self.end_time.strftime('%I: %M: %p')}"
 
     
     def check_available_time(self):
@@ -74,51 +86,90 @@ class TimeSlot(models.Model):
     
 
     @classmethod
-    def generate_slots(cls, court_instance, start_time, end_time, book_date=None, duration_hours=1):
+    def generate_slots(cls, court_instance, start_time, end_time, start_date=None, end_date=None, duration_hours=1, is_available=True):
         
-        if book_date is None:
-            book_date = timezone.localdate()
+        if start_date is None:
+            start_date = timezone.localdate()
         
-        # make_aware is the process of taking a "dumb" time and making it a "smart" time.
-        start_dt = timezone.make_aware(datetime.combine(book_date, start_time))
-        end_dt = timezone.make_aware(datetime.combine(book_date, end_time))
-        # combine is a function inside the datetime library.
+        if end_date is None:
+            end_date = timezone.localdate()
+        
+        if start_date > end_date:
+            raise ValueError('Start date cannot be after end date')
+        
 
-        slot_list = []
+        slots = cls.objects.filter(
+            court = court_instance,
+            date__gte = start_date,
+            date__lte = end_date + timedelta(days=1)
+        ).values_list('date', 'start_time')
+
+        existing_slots = set(slots)
         
-        # time-slicing algorithm
+
+        slot_lists = []
+        current_date = start_date
+
         with transaction.atomic():
-            while start_dt < end_dt:
-                next_slot = start_dt + timedelta(hours=duration_hours)
 
-                if next_slot > end_dt:
-                    break
+            while current_date <= end_date:
 
-                slots = cls.objects.create(
-                    court = court_instance,
-                    start_time = start_dt,
-                    end_time = next_slot,
-                    date = book_date,
-                    is_available = True
-                )
- 
-                slot_list.append(slots)
-                start_dt = next_slot
-        
-        return f'{len(slot_list)}'
-    
+                # make_aware is the process of taking a "dumb" time and making it a "smart" time.
+
+                start_dt = timezone.make_aware(datetime.combine(current_date, start_time))
+                end_dt = timezone.make_aware(datetime.combine(current_date, end_time))
+
+                # combine is a function inside the datetime library.
+                # time-slicing algorithm
+                
+                if end_time <= start_time:
+                    end_dt += timedelta(days=1)
+
+
+                while start_dt < end_dt:
+                    next_slot = start_dt + timedelta(hours=duration_hours)
+
+                    if next_slot > end_dt:
+                        break
+
+                    cal_date = start_dt.date()
+                    start_t = start_dt.time()
+
+                    if (cal_date, start_t) not in existing_slots:
+
+                        slot_lists.append(
+                            cls(
+                                court = court_instance,
+                                start_time = start_t,
+                                end_time = next_slot.time(),
+                                date = cal_date,
+                                is_available = is_available
+                        ) )
+
+                    
+                    start_dt = next_slot
+                
+                current_date += timedelta(days=1)
+            
+            if slot_lists:
+                cls.objects.bulk_create(slot_lists)
+
+        return len(slot_lists)    
+
+
+
     
     # overlap (double booking) prevention 
     def lock_slot(self):
         if self.is_available:
             self.is_available = False
-            self.save()
+            self.save(update_fields=['is_available'])
             return True
         return False
     
     def release_slot(self):
         self.is_available = True
-        self.save()
+        self.save(update_fields=['is_available'])
 
     
     @classmethod
@@ -127,11 +178,12 @@ class TimeSlot(models.Model):
     
 
 
-
 class Booking(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='bookings')
     booking_date = models.DateTimeField(auto_now_add=True)
     total_booking_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    advance_deposit = models.DecimalField(max_digits=10, decimal_places=2, default=200) # Fixed token to lock slot
+    due_later = models.DecimalField(max_digits=10, decimal_places=2, default=0) # Remaining amount paid by losers later
     
     status = [
         ('pending', 'PENDING'),
@@ -148,7 +200,7 @@ class Booking(models.Model):
     def create_booking(self):
         self.booking_status = 'pending' # pending: logic side, We have the record, but don't let the user play yet because they haven't paid
         self.save()
-        return f'Booking for {self.user.username} is created'
+        return f'Booking for {self.user.username} is pending'
     
     
     def confirm_booking(self):
@@ -160,19 +212,36 @@ class Booking(models.Model):
     
     
     def cancel_booking(self):
-        self.booking_status = 'cancelled'
-        self.save()
 
-        for slot in self.booking_slots.all():
-            slot.timeslot.release_slot()
+        with transaction.atomic():
+
+            self.booking_status = 'cancelled'
+            self.save()
+         
+            for booking_slot in self.booking_slots.select_related('timeslot').all():
+                booking_slot.timeslot.release_slot()
+
+        return 'Booking Cancelled'
+    
 
 
     def update_total_price(self):
+        from decimal import Decimal
+
         total = self.booking_slots.aggregate(Sum('unit_price'))['unit_price__sum'] or 0
+        # aggregate : "to combine multiple rows of data into a single summary value."
+
+        total_decimal = Decimal(str(total))
+        advance_decimal = Decimal(str(self.advance_deposit))
+
         self.total_booking_price = total
+
+        self.due_later = max(Decimal('0.00'), total_decimal - advance_decimal)
+        # max() function compares two values and picks the largest one.
         self.save()
 
-    
+        return f'total price : {self.total_booking_price} and due : {self.due_later}' 
+
     
     def view_bookings(self):
         return {
@@ -181,7 +250,9 @@ class Booking(models.Model):
             'date': self.booking_date.strftime('%m-%d %H'),
             # strftime: "String Format Time." It is a Python function that takes date (which the computer understands) and turns it into a "String" (which humans and React understand).
             'total':self.total_booking_price,
-            'status': self.status
+            'deposite': self.advance_deposit,
+            'due': self.due_later,
+            'status': self.booking_status
         }
 
 
@@ -191,6 +262,9 @@ class BookingSlot(models.Model):
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='booking_slots')
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
       
+
+    def __str__(self):
+        return f'{self.id}, {self.booking.user.username}'
 
     # overlap prevention
     def available_slots(self):
@@ -202,8 +276,11 @@ class BookingSlot(models.Model):
     def calculate_slot_price(self):
         base = self.timeslot.court.base_price
         hour = self.timeslot.start_time.hour
+        
+        if hour >= 22 or hour < 5:
+            return base + 700
 
-        if hour >= 18:
+        elif 18 <= hour < 22:
             return base + 500
         
         elif 13 <= hour < 18:
@@ -235,17 +312,38 @@ class BookingSlot(models.Model):
     # greedy search
     @classmethod
     def multiple_booking(cls, booking_instance, timeslots_id):
+
         with transaction.atomic():
+            locked_slots = TimeSlot.objects.select_for_update().filter(id__in=timeslots_id)
+
             slots_created = []
-            for ts_id in timeslots_id:
+
+            for slot in locked_slots:
                 new_slot = cls.objects.create(
                     booking = booking_instance,
-                    timeslot_id = ts_id
-                )
+                    timeslot = slot
+                )    
+                
                 slots_created.append(new_slot)
         
             return slots_created
 
+
+class BookingCancellation(models.Model):
+    CANCELLATION_CHOICES = [
+        ('sinlge', 'single slot cancellation'),
+        ('entire', 'entire slot cancellation')
+    ]
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='booking_cancellation')
+    booking_id = models.IntegerField()
+    court_name = models.CharField(max_length=150)
+    slot_date = models.DateField()
+    slot_range = models.CharField(max_length=100) # 4-5..
+    cancellation_type = models.CharField(max_length=20, choices=CANCELLATION_CHOICES)
+    cancelled_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"[{self.get_cancellation_type_display()}] Booking {self.booking_id} by {self.user.username if self.user else 'Deleted User'}"
 
 
 
@@ -282,7 +380,7 @@ class Payment(models.Model):
     def initial_payment(self):
         self.payment_status = 'pending'
         self.save()
-        return f'Payment of {self.amount} pays via {self.payment_methods}'
+        return f'Payment {self.amount} pays via {self.payment_methods} esewa is pending'
     
     # hashing logic 
     def confirm_payment(self, txn_hash):
@@ -290,18 +388,21 @@ class Payment(models.Model):
         self.transaction_hash = txn_hash
         self.save()
 
-        self.booking.booking_status = 'confirmed'
-        self.booking.save()
+        is_confirmed = self.booking.confirm_booking()
 
-        return 'Payment confirm and booking booked'
+        if is_confirmed:
+            return 'Advance pay confirmed and futsal booked'
+        else:
+            return 'Payment received, but booking was already cancelled!'
 
 
     def handle_failuer(self):
         if self.payment_status != 'completed':
-            self.payment_status = 'failed'
-            self.save()
+            with transaction.atomic():
+                self.payment_status = 'failed'
+                self.save()
 
-            self.booking.cancel_booking()
+                self.booking.cancel_booking()
 
             return 'Payment Failed'
 
@@ -312,10 +413,12 @@ class Payment(models.Model):
             return {
                 'Player name': self.booking.user.username,
                 'Receipt number': f'Recp-{self.id}',
-                'Amount': self.amount,
+                'Advance amount': self.amount,
+                'Remaining Due (Loser Pays)': self.booking.due_later,
                 'Method': self.payment_methods,
-                'Txn id': self.TransactionHash,
-                'Date': self.payment_date.strftime('%Y-%m-%d')
+                'Txn id': self.transaction_hash,
+                'Date': self.payment_date.strftime('%Y-%m-%d'),
+                'total amount': self.booking.total_booking_price
             }
 
         return 'Receipt not available for unpaid transactions.'
