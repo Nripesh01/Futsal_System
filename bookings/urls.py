@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import CourtView, CourtDetailView, TimeSlotListView, CourtSlotGetView, GenerateSlotView
-from .views import BookingListCreateView, CancelIndividualSlotView, CancelFullBookingView
+from .views import BookingListCreateView, CancelIndividualSlotView, CancelFullBookingView, CancellationView
+from .views import PaymentVerifyView
 
 urlpatterns = [
 
@@ -20,5 +21,8 @@ urlpatterns = [
 
     path('booking/<int:booking_id>/cancel/', CancelFullBookingView.as_view(), name='cancel-booking'),
 
+    path('cancellation/', CancellationView.as_view(), name='admin-today-cancellations'),
+
+    path('booking/<int:booking_id>/verify-payment/', PaymentVerifyView.as_view(), name='verify-payment'),
 ]
 

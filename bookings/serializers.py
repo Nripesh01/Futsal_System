@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, Payment
+from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, BookingCancellation, Payment
 import nepali_datetime
 from datetime import datetime, timedelta
 from django.utils import timezone
@@ -141,7 +141,7 @@ class BookingSerializer(serializers.ModelSerializer):
                   'total_booking_price', 'booking_status', 'booking_slots')
         
     def get_court_name(self, obj):
-        slots = list(obj.booking_slots.all())
+        slots = list(obj.booking_slots.all()) # here list forcing Django to hit the database immediately
         if slots:
             return slots[0].timeslot.court.court_name
         
@@ -161,13 +161,47 @@ class CreateBookingSerializer(serializers.Serializer):
             if not slot.is_available:
                 raise serializers.ValidationError(f"TimeSlot {slot.id} is already booked.")
 
-        unique_court_id = slots.values_list('court_id', flat=True).distinct()
+        unique_court_id = slots.values_list('court_id', flat=True).distinct() # distinct() removes all duplicate items from that list, keeping only the unique values.
 
         if unique_court_id.count() > 1:
             raise serializers.ValidationError('You cannot book slots from different courts in one time.')    
         
         return value
 
-        
     
 
+class BookingCancellationSerializer(serializers.ModelSerializer):
+    # Format the date beautifully for your frontend
+    cancelled_at = serializers.DateTimeField(format='%Y-%m-%d %I:%M %p', read_only=True)
+
+    class Meta:
+        model = BookingCancellation
+        fields = ('id', 'user', 'booking_id', 'court_name', 'slot_date', 'slot_range', 
+                'cancellation_type', 'cancelled_at')
+        
+        
+
+class PaymentVerifySerializer(serializers.Serializer):
+    transaction_hash = serializers.CharField(max_length=100, required=True)
+    payment_methods = serializers.ChoiceField(choices=Payment.methods, required=True)
+
+
+class BookingPaymentSerializer(serializers.ModelSerializer):
+    payment_details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Booking
+        fields = ('id', 'booking_status', 'total_booking_price', 'advance_deposit', 'due_later', 'payment_details')
+
+    def get_payment_details(self, obj):
+        payment = getattr(obj, 'payments', None)
+
+        if payment:
+            return {
+                "payment_id": payment.id,
+                "payment_status" : payment.payment_status,
+                "method" : payment.payment_methods,
+                "transaction_hash" : payment.transaction_hash
+            }
+        
+        return None

@@ -154,10 +154,8 @@ class TimeSlot(models.Model):
             if slot_lists:
                 cls.objects.bulk_create(slot_lists)
 
-        return len(slot_lists)    
-
-
-
+        return len(slot_lists) 
+       
     
     # overlap (double booking) prevention 
     def lock_slot(self):
@@ -167,6 +165,7 @@ class TimeSlot(models.Model):
             return True
         return False
     
+
     def release_slot(self):
         self.is_available = True
         self.save(update_fields=['is_available'])

@@ -1,5 +1,6 @@
-from .serializers import CourtSerializer, TimeSlotSerializer, GenerateSlotSerializer, BookingSlotSerializer, BookingSerializer, CreateBookingSerializer
-from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, BookingCancellation
+from .serializers import CourtSerializer, TimeSlotSerializer, GenerateSlotSerializer, PaymentVerifySerializer, BookingPaymentSerializer
+from .serializers import BookingSlotSerializer, BookingSerializer, CreateBookingSerializer, BookingCancellationSerializer
+from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, BookingCancellation, Payment
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
@@ -9,7 +10,8 @@ from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth import get_user_model
 import nepali_datetime
-from datetime import datetime
+from datetime import datetime, timedelta
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -92,6 +94,20 @@ class TimeSlotListView(APIView):
 
     def get(self, request):
 
+        expired_time = timezone.now() - timedelta(minutes=3)
+
+        expired_booking = Booking.objects.filter(booking_status='pending', booking_date__lt=expired_time)
+        
+        if expired_booking.exists():
+            with transaction.atomic():
+
+                for old_booking in expired_booking:
+                    for slot in old_booking.booking_slots.all():
+                        slot.timeslot.release_slot()
+
+                    old_booking.booking_status = 'failed'
+                    old_booking.save()  
+                    
         queryset = TimeSlot.objects.all()
 
         court_id = request.query_params.get('court_id')
@@ -224,11 +240,17 @@ class BookingListCreateView(APIView):
 
     def get(self, request):
         player = User.objects.filter(role__role_name__iexact='Player').first()
+
         if not player:
             return Response('Player not found', status=status.HTTP_404_NOT_FOUND)
         
-        booking = Booking.objects.filter(user=player).prefetch_related('booking_slots__timeslot__court')
-        serializer = BookingSerializer(booking, many=True)
+        queryset = Booking.objects.filter(user=player).prefetch_related('booking_slots__timeslot__court')
+        court_id = request.query_params.get('court_id')
+
+        if court_id:
+            queryset = queryset.filter(booking_slots__timeslot__court=court_id).distinct() 
+            
+        serializer = BookingSerializer(queryset, many=True)
 
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -291,7 +313,7 @@ class CancelIndividualSlotView(APIView):
 
             booking_slot.delete()
 
-            if parent_booking.booking_slots.count == 0:
+            if parent_booking.booking_slots.count() == 0:
                 parent_booking.booking_status = 'cancelled'
                 parent_booking.total_booking_price = 0.00
                 parent_booking.advance_deposit = 0.00
@@ -305,30 +327,30 @@ class CancelIndividualSlotView(APIView):
         )
 
 
-
 class CancelFullBookingView(APIView):
 
     def post(self, request, booking_id):
         booking = get_object_or_404(Booking, id=booking_id)
 
         player = User.objects.filter(role__role_name__iexact='Player').first()
+
         if booking.user != player:
             return Response('Unauthorized action', status=status.HTTP_403_FORBIDDEN)
         
         if booking.booking_status == 'cancelled':
             return Response("this booking is already cancelled", status=status.HTTP_400_BAD_REQUEST)
         
-        active_slots = booking.booking_slots.all()
+        active_slots = list(booking.booking_slots.all())
 
         with transaction.atomic():
             for slot in active_slots:
-                BookingCancellation.objects.create(
+                log_entry = BookingCancellation.objects.create(
                     user = player,
                     booking_id = booking.id,
                     court_name = slot.timeslot.court.court_name,
                     slot_date = slot.timeslot.date,
-                    slot_time_range = f"{slot.timeslot.start_time} - {slot.timeslot.end_time}",
-                    cancellation_type = 'full'
+                    slot_range = f"{slot.timeslot.start_time} - {slot.timeslot.end_time}",
+                    cancellation_type = 'entire'
                 )
 
                 slot.delete()
@@ -341,7 +363,73 @@ class CancelFullBookingView(APIView):
 
         booking.refresh_from_db()
 
+        booking_data = BookingSerializer(booking).data
+
         return Response({
-            "message" : f'booking id {booking_id} has been cancelled', "booking" : BookingSerializer(booking).data},
-            status=status.HTTP_200_OK
-        ) 
+            "message" : f'booking id {booking_id} has been cancelled', 
+            "booking": booking_data}, status=status.HTTP_200_OK ) 
+
+
+class CancellationView(APIView):
+    def get(self, request):
+
+        admin = User.objects.filter(role__role_name__iexact='Admin').first()
+
+        if not admin:
+            return Response("Only administrators can view cancellation", status=status.HTTP_403_FORBIDDEN)
+        
+        today = timezone.localtime(timezone.now()).date()
+        one_week_ago = today - timedelta(days=7)
+
+        week_cancellations = BookingCancellation.objects.filter(
+            cancelled_at__date__range=[one_week_ago, today]
+            ).order_by('-cancelled_at')
+
+        total_cancel_slot = week_cancellations.count()
+        entire_bookings_count = week_cancellations.filter(cancellation_type='entire').count()
+        single_slots_count = week_cancellations.filter(cancellation_type='single').count()
+
+        serializer = BookingCancellationSerializer(week_cancellations, many=True)
+
+        return Response({
+            "date":f"{one_week_ago.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}",
+            "summary": {
+                "total_cancellations": total_cancel_slot,
+                "full_bookings_cancelled": entire_bookings_count,
+                "individual_slots_cancelled": single_slots_count
+            },
+            "records": serializer.data}, status=status.HTTP_200_OK)
+    
+
+
+class PaymentVerifyView(APIView):
+
+    def post(self, request, booking_id):
+        booking = get_object_or_404(Booking, id=booking_id)
+
+        if booking.booking_status != 'pending':
+            return Response("Cannot process payment, this booking is already failed.", status=status.HTTP_400_BAD_REQUEST)
+        
+        serializer = PaymentVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        txn_hash = serializer.validated_data['transaction_hash']
+        method = serializer.validated_data['payment_methods']
+
+        if Payment.objects.filter(transaction_hash=txn_hash).exists():
+            return Response("Duplicate transaction hash", status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            with transaction.atomic():
+                payment, created = Payment.objects.get_or_create(
+                    booking=booking, defaults={'amount': booking.advance_deposit, 'payment_methods': method})
+                
+                message = payment.confirm_payment(txn_hash)
+
+        except Exception as e:
+            return Response({"error": f"Transaction failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        return Response({
+            "message": message,
+            "booking": BookingPaymentSerializer(booking).data
+        }, status=status.HTTP_200_OK)
