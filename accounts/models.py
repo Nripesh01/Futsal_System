@@ -6,7 +6,6 @@ from django.core.exceptions import PermissionDenied
 from django.http import Http404
 
 
-
 ADMIN_PERMISSIONS = [
     'assign_roles', 'manage_users', 'manage_futsal_courts', 'manage_time_slots', 'monitor_payments', 'search_futsals',
     'generate_reports', 'view_futsal_courts', 'check_time_available', 'create_booking', 'view_bookings', 'select_time_slot',
@@ -19,23 +18,21 @@ PLAYER_PERMISSIONS = [
 ]
 
 
+class Permission(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.CharField(max_length=250, blank=True)
+
+    def __str__(self):
+        return self.name
+    
 
 class Role(models.Model):
     role_name = models.CharField(max_length=50)
-    permission = models.TextField(help_text='According to the role you will get permissions.')
+    permissions = models.ManyToManyField(Permission, blank=True, related_name='roles')
 
     def __str__(self):
         return self.role_name
     
-    def get_permissions(self):
-        if self.role_name == 'Admin':
-            return ADMIN_PERMISSIONS
-        
-        elif self.role_name == 'Player':
-            return PLAYER_PERMISSIONS
-        
-        return[]
-
 
 class User(AbstractUser):
     phone_number = models.CharField(max_length=10, unique=True, null=False, blank=False)
@@ -52,9 +49,8 @@ class User(AbstractUser):
         if not self.role:
             return False
         
-        return perm_name in self.role.get_permissions()
+        return self.role.permissions.filter(name=perm_name).exists()
     
-
 
     def save(self, *args, **kwargs):
         if not self.role:
@@ -67,7 +63,6 @@ class User(AbstractUser):
                 )
         
         super().save(*args, **kwargs)
-
 
 
     def assign_roles(self, get_user_id, get_role_id):
@@ -88,7 +83,6 @@ class User(AbstractUser):
         
         return 'Permission denied'
     
-
 
     def manage_users(self, get_user_id, action):
 
@@ -113,7 +107,6 @@ class User(AbstractUser):
         
         return 'Permission denied'
             
-
 
     def manage_futsal_courts(self, action, court_id=None, **kwargs):
 
@@ -145,10 +138,7 @@ class User(AbstractUser):
             except FutsalCourt.DoesNotExist:
                 raise Http404("court not found")
             
-        raise ValueError("Invalid action")
-        
-        
-    
+        raise ValueError("Invalid action")  
 
 
     def manage_time_slots(self, court_instance, start_time, end_time, start_date=None, end_date=None, duration_hours=1):
@@ -178,7 +168,6 @@ class User(AbstractUser):
         return 'Permission denied'     
 
     
-
     def generate_reports(self):
         if self.has_permission('generate_reports'):
 
@@ -206,8 +195,6 @@ class User(AbstractUser):
         return FutsalCourt.search_location(location, city_area)
         
 
-
-
     def view_bookings(self):
         if self.has_permission('view_bookings'):
             
@@ -215,8 +202,7 @@ class User(AbstractUser):
         
         return 'Permission denied'
         
-        
-
+    
     def check_time_available(self, slots):
         if self.has_permission('check_time_available'):
             

@@ -11,6 +11,7 @@ User = get_user_model()
 
 
 class FutsalCourt(models.Model):
+    owners = models.ForeignKey(User, on_delete=models.CASCADE, related_name='courts')
     court_name = models.CharField(max_length=50)
     location = models.CharField(max_length=50, help_text='Shantinagar, Kathmandu')
     base_price = models.DecimalField(max_digits=10, decimal_places=2, help_text='morning/mid/night rate')
@@ -29,7 +30,7 @@ class FutsalCourt(models.Model):
     phone_number = models.CharField(max_length=10)
 
     def __str__(self):
-        return f'{self.court_name}, {self.city_area}'
+        return f'{self.court_name}, {self.city_area} managed by {self.owners.username}'
     
     def update_details(self, **kwargs):
         for field, value in kwargs.items():
@@ -171,6 +172,17 @@ class TimeSlot(models.Model):
         self.save(update_fields=['is_available'])
 
     
+    def delete(self, *args, **kwargs):
+        active_booking = self.booking_times.filter(booking__booking_status__in=['pending', 'confirmed']).exists()
+
+        if active_booking:
+            raise ValidationError({"error" : "Cannot delete this slot because it is currently tied to an active or confirmed booking. "
+                "Please cancel the customer's booking first."})
+        
+        super().delete(*args, **kwargs)
+
+
+    
     @classmethod
     def get_court_time(cls, court_id):
         return cls.objects.filter(court_id=court_id)
@@ -181,7 +193,7 @@ class Booking(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='bookings')
     booking_date = models.DateTimeField(auto_now_add=True)
     total_booking_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    advance_deposit = models.DecimalField(max_digits=10, decimal_places=2, default=200) # Fixed token to lock slot
+    advance_deposit = models.DecimalField(max_digits=10, decimal_places=2, default=300) # advance pay to lock slot
     due_later = models.DecimalField(max_digits=10, decimal_places=2, default=0) # Remaining amount paid by losers later
     
     status = [
@@ -195,6 +207,22 @@ class Booking(models.Model):
     def __str__(self):
         return f'Booking {self.id} by {self.user.username}'
     
+    @classmethod
+    def expired_booking(cls):
+
+        expired_time = timezone.now() - timedelta(minutes=3)
+        expired_booking = cls.objects.filter(booking_status='pending', booking_date__lt=expired_time)
+            
+        if expired_booking.exists():
+                with transaction.atomic():
+
+                    for old_booking in expired_booking:
+                        for slot in old_booking.booking_slots.all():
+                            slot.timeslot.release_slot()
+
+                        old_booking.booking_status = 'cancelled'
+                        old_booking.save()  
+
     
     def create_booking(self):
         self.booking_status = 'pending' # pending: logic side, We have the record, but don't let the user play yet because they haven't paid
@@ -222,7 +250,6 @@ class Booking(models.Model):
 
         return 'Booking Cancelled'
     
-
 
     def update_total_price(self):
         from decimal import Decimal
@@ -326,6 +353,7 @@ class BookingSlot(models.Model):
                 slots_created.append(new_slot)
         
             return slots_created
+
 
 
 class BookingCancellation(models.Model):

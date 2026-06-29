@@ -2,26 +2,32 @@ from .serializers import CourtSerializer, TimeSlotSerializer, GenerateSlotSerial
 from .serializers import BookingSlotSerializer, BookingSerializer, CreateBookingSerializer, BookingCancellationSerializer
 from .models import FutsalCourt, TimeSlot, Booking, BookingSlot, BookingCancellation, Payment
 from rest_framework.views import APIView
-from rest_framework import status
+from rest_framework import status, generics
 from rest_framework.response import Response
 from django.db import transaction
-from rest_framework.permissions import AllowAny, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import AllowAny, IsAuthenticatedOrReadOnly, IsAuthenticated
+from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth import get_user_model
 import nepali_datetime
 from datetime import datetime, timedelta
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 
 User = get_user_model()
 
 
 class CourtView(APIView):
-    # permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated()]
+        
+        return [AllowAny()]
 
     def get(self, request):
-        courts = FutsalCourt.objects.all()
-        
+                
         location = request.query_params.get('location', '').strip()
         city_area = request.query_params.get('city_area', '').strip()
 
@@ -37,20 +43,26 @@ class CourtView(APIView):
     
 
     def post(self, request):
+    
         serializer = CourtSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        admin = User.objects.filter(role__role_name__iexact='Admin').first()
+        try:
+            new_court = request.user.manage_futsal_courts(action='create', **serializer.validated_data)
+            return Response(CourtSerializer(new_court).data, status=status.HTTP_201_CREATED)
 
-        if not admin:
-            return Response('admin not found', status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"error" : str(e)}, status=status.HTTP_403_FORBIDDEN)
 
-        new_court = admin.manage_futsal_courts(action='create', **serializer.validated_data)
-         
-        return Response(CourtSerializer(new_court).data, status=status.HTTP_201_CREATED)
 
 
 class CourtDetailView(APIView):
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        
+        return [IsAuthenticated()]
         
     def get(self, request, pk):
 
@@ -60,54 +72,40 @@ class CourtDetailView(APIView):
     
 
     def put(self, request, pk):
+
         court = get_object_or_404(FutsalCourt, pk=pk)
 
         serializer = CourtSerializer(court, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        admin = User.objects.filter(role__role_name__iexact='Admin').first()
+        try:
+            update_court = request.user.manage_futsal_courts(action='update', court_id=court.id, **serializer.validated_data)
+            return Response(CourtSerializer(update_court).data, status=status.HTTP_200_OK)
+        
+        except PermissionDenied as e:
+            return Response({"error" : str(e)}, status=status.HTTP_403_FORBIDDEN)
 
-        if not admin:
-            return Response('admin not found', status=status.HTTP_400_BAD_REQUEST)
-
-        update_court = admin.manage_futsal_courts(action='update', court_id=court.id, **serializer.validated_data)
-
-        return Response(CourtSerializer(update_court).data, status=status.HTTP_200_OK)
-    
 
     def delete(self, request, pk):
+
         court = get_object_or_404(FutsalCourt, pk=pk)
-
-        admin = User.objects.filter(role__role_name__iexact='Admin').first()
         
-        if not admin:
-            return Response('admin not found', status=status.HTTP_400_BAD_REQUEST)
+        try:
+            del_court = request.user.manage_futsal_courts(action='delete', court_id=court.id)
+            return Response({'message': del_court}, status=status.HTTP_200_OK)
+        
+        except PermissionDenied as e:
+            return Response({"error" : str(e)}, status=status.HTTP_403_FORBIDDEN)
 
-
-        del_court = admin.manage_futsal_courts(action='delete', court_id=court.id)
-
-        return Response({'message': del_court}, status=status.HTTP_200_OK)
-    
 
 
 class TimeSlotListView(APIView):
+    permission_classes = [AllowAny]
 
     def get(self, request):
-
-        expired_time = timezone.now() - timedelta(minutes=3)
-
-        expired_booking = Booking.objects.filter(booking_status='pending', booking_date__lt=expired_time)
         
-        if expired_booking.exists():
-            with transaction.atomic():
+        Booking.expired_booking()
 
-                for old_booking in expired_booking:
-                    for slot in old_booking.booking_slots.all():
-                        slot.timeslot.release_slot()
-
-                    old_booking.booking_status = 'failed'
-                    old_booking.save()  
-                    
         queryset = TimeSlot.objects.all()
 
         court_id = request.query_params.get('court_id')
@@ -130,7 +128,10 @@ class TimeSlotListView(APIView):
                 queryset = queryset.filter(date=query_date)
             
             except ValueError:
-                return Response('Invalid date, Use YYYY-MM-DD format', status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"error": "Invalid date format. Please use 'YYYY-MM-DD'."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
 
         if available is not None:
@@ -140,9 +141,8 @@ class TimeSlotListView(APIView):
             elif available.lower() == 'false':
                 queryset = queryset.filter(is_available=False)
         
-
         if not queryset.exists():
-            return Response('no record match', status=status.HTTP_200_OK)
+            return Response([], status=status.HTTP_200_OK)
         
         serializer = TimeSlotSerializer(queryset, many=True)
 
@@ -150,7 +150,83 @@ class TimeSlotListView(APIView):
     
 
 
+class DeleteSlotView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self,request, slot_id=None):
+      
+        del_date_eng = request.query_params.get('date')
+        del_date_nep = request.query_params.get('date_bs')
+
+        lookup_date = None
+        display_date = ""
+
+        try:
+            if not request.user.has_permission('manage_time_slots'):
+                raise PermissionDenied("You do not have access to manage time slots.")
+            
+            if del_date_eng:
+                lookup_date = datetime.strptime(del_date_eng, '%Y-%m-%d').date()
+                display_date = del_date_eng
+
+            elif del_date_nep:
+                try:
+                    np_date = nepali_datetime.datetime.strptime(del_date_nep, '%Y-%m-%d').date()
+                    lookup_date = np_date.to_datetime_date()
+                    display_date = f'{del_date_nep}'
+                
+                except ValueError:
+                    return Response({
+                        "error": "Invalid Nepali date format. Please use 'YYYY-MM-DD' (e.g., 2083-03-11)."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+        
+            with transaction.atomic():
+                if lookup_date:
+                    all_slots = TimeSlot.objects.filter(date=lookup_date)
+                 
+                    if not all_slots.exists():
+                        return Response({"message": f"No slots found on {display_date}."}, status=status.HTTP_404_NOT_FOUND)       
+
+                    delete_count = 0
+                    skip_count = 0
+
+                    for slot in all_slots:
+                            if slot.booking_times.filter(booking__booking_status__in=['pending', 'confirmed']).exists():
+                                skip_count += 1
+                            
+                            else:
+                                slot.delete()
+                                delete_count += 1
+
+                    return Response({
+                            "message": f"deletion completed for {display_date}.",
+                            "slots deleted": delete_count,
+                            "slots skipped due to active bookings": skip_count
+                        }, status=status.HTTP_200_OK)        
+                
+                else:
+                    if not slot_id:
+                            return Response({"error": "Slot ID or Date parameter is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    timeslot = get_object_or_404(TimeSlot, id=slot_id)
+                    timeslot.delete()
+                    return Response({"message": f"Time slot {slot_id} deleted successfully."}, status=status.HTTP_200_OK)
+        
+        except PermissionDenied as e:
+            return Response({"error" : str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+        except ValueError:
+            return Response({"error": "Invalid English date format. Please use 'YYYY-MM-DD'."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        except ValidationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
 class CourtSlotGetView(APIView):
+    permission_classes = [AllowAny]
 
     def get(self, request, court_id):
         
@@ -178,7 +254,7 @@ class CourtSlotGetView(APIView):
                 status=status.HTTP_400_BAD_REQUEST)
         
         if not queryset.exists():
-            return Response('related date not found', status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "Related date not found."}, status=status.HTTP_404_NOT_FOUND)
             
         serializer = TimeSlotSerializer(queryset, many=True)
 
@@ -187,6 +263,7 @@ class CourtSlotGetView(APIView):
     
 
 class GenerateSlotView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, court_id):
 
@@ -196,17 +273,12 @@ class GenerateSlotView(APIView):
         serializer = GenerateSlotSerializer(data=data)
         serializer.is_valid(raise_exception=True)
 
-        admin = User.objects.filter(role__role_name__iexact='Admin').first()
-
-        if not admin:
-            return Response('admin not found', status=status.HTTP_400_BAD_REQUEST)
-        
         data = serializer.validated_data
 
         court_instance = get_object_or_404(FutsalCourt, id=court_id)
 
         try:
-            slots_created = admin.manage_time_slots(
+            slots_created = request.user.manage_time_slots(
                 court_instance=court_instance,
                 start_date=data.get('start_date'),
                 end_date=data.get('end_date'),
@@ -215,11 +287,14 @@ class GenerateSlotView(APIView):
                 duration_hours=data['duration_hours']
             )
             
-        except Exception as e:
+        except PermissionDenied as e:
             return Response({"error": str(e)}, status=status.HTTP_403_FORBIDDEN)
         
+        except Exception as e:
+            return Response({"error": f"Failed to build timelines: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+       
         if slots_created == 0:
-            return Response('slot times already exist for this court', status=status.HTTP_200_OK)
+            return Response({"message": "Slot times already exist for this court."}, status=status.HTTP_200_OK)
         
         generated_slots = TimeSlot.objects.filter(
             court = court_instance,
@@ -237,14 +312,13 @@ class GenerateSlotView(APIView):
 
 
 class BookingListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        player = User.objects.filter(role__role_name__iexact='Player').first()
 
-        if not player:
-            return Response('Player not found', status=status.HTTP_404_NOT_FOUND)
+        Booking.expired_booking()
         
-        queryset = Booking.objects.filter(user=player).prefetch_related('booking_slots__timeslot__court')
+        queryset = Booking.objects.filter(user=request.user).prefetch_related('booking_slots__timeslot__court')
         court_id = request.query_params.get('court_id')
 
         if court_id:
@@ -256,19 +330,18 @@ class BookingListCreateView(APIView):
     
 
     def post(self, request):
+
         serializer = CreateBookingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         timeslot_ids = serializer.validated_data['timeslot_ids']
 
-        player = User.objects.filter(role__role_name__iexact='Player').first()
-
-        if not player:
-            return Response('player not found', status=status.HTTP_404_NOT_FOUND)
-        
         try:
             with transaction.atomic():
-                booking = Booking(user=player)
-                booking.create_booking()
+                booking = Booking(user=request.user)
+                result = booking.create_booking()
+
+                if result == 'Permission denied':
+                    return Response({"error": "Permission denied: You do not have access to create bookings."}, status=status.HTTP_403_FORBIDDEN)
 
                 BookingSlot.multiple_booking(booking_instance=booking, timeslots_id=timeslot_ids)
 
@@ -288,22 +361,25 @@ class BookingListCreateView(APIView):
 
 
 class CancelIndividualSlotView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, slot_id):
+
+        if not request.user.has_permission('cancel_booking'):
+            return Response({"error" : "You do not have permission to cancel the booking"}, status=status.HTTP_403_FORBIDDEN)
+        
         booking_slot = get_object_or_404(BookingSlot, id=slot_id)
         parent_booking = booking_slot.booking
 
-        player = User.objects.filter(role__role_name__iexact='Player').first()
-
-        if parent_booking.user != player:
-            return Response("Unauthorized access", status=status.HTTP_403_FORBIDDEN)
+        if parent_booking.user != request.user:
+            return Response({"error": "Unauthorized access"}, status=status.HTTP_403_FORBIDDEN)
         
         if parent_booking.booking_status == 'cancelled':
-            return Response("this slots is already cancelled", status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "This slot is already cancelled"}, status=status.HTTP_400_BAD_REQUEST)
         
         with transaction.atomic():
             BookingCancellation.objects.create(
-                user = player,
+                user = request.user,
                 booking_id = parent_booking.id,
                 court_name = booking_slot.timeslot.court.court_name,
                 slot_date = booking_slot.timeslot.date,
@@ -328,24 +404,27 @@ class CancelIndividualSlotView(APIView):
 
 
 class CancelFullBookingView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, booking_id):
+
+        if not request.user.has_permission('cancel_booking'):
+            return Response({"error" : "You do not have permission to cancel the booking"}, status=status.HTTP_403_FORBIDDEN)
+        
         booking = get_object_or_404(Booking, id=booking_id)
 
-        player = User.objects.filter(role__role_name__iexact='Player').first()
-
-        if booking.user != player:
-            return Response('Unauthorized action', status=status.HTTP_403_FORBIDDEN)
+        if booking.user != request.user:
+            return Response({"error": "Unauthorized action."}, status=status.HTTP_403_FORBIDDEN)
         
         if booking.booking_status == 'cancelled':
-            return Response("this booking is already cancelled", status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "This booking is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
         
         active_slots = list(booking.booking_slots.all())
 
         with transaction.atomic():
             for slot in active_slots:
                 log_entry = BookingCancellation.objects.create(
-                    user = player,
+                    user = request.user,
                     booking_id = booking.id,
                     court_name = slot.timeslot.court.court_name,
                     slot_date = slot.timeslot.date,
@@ -371,12 +450,11 @@ class CancelFullBookingView(APIView):
 
 
 class CancellationView(APIView):
+    permission_classes = [IsAuthenticated]
     def get(self, request):
 
-        admin = User.objects.filter(role__role_name__iexact='Admin').first()
-
-        if not admin:
-            return Response("Only administrators can view cancellation", status=status.HTTP_403_FORBIDDEN)
+        if not request.user.has_permission('generate_reports'):
+            return Response({"error" : "Only admin can see the cencellation view"}, status=status.HTTP_403_FORBIDDEN)
         
         today = timezone.localtime(timezone.now()).date()
         one_week_ago = today - timedelta(days=7)
@@ -403,12 +481,32 @@ class CancellationView(APIView):
 
 
 class PaymentVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, booking_id):
+
+        if not request.user.has_permission('make_payment'):
+            return Response({"error" : "You do not have permission to make payment"}, status=status.HTTP_403_FORBIDDEN)
+               
         booking = get_object_or_404(Booking, id=booking_id)
 
+        if booking.user != request.user:
+            return Response({"error": "Unauthorized action."}, status=status.HTTP_403_FORBIDDEN)
+
         if booking.booking_status != 'pending':
-            return Response("Cannot process payment, this booking is already failed.", status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error" : f"Cannot process payment, this booking is {booking.booking_status}."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        exp_time = timezone.now() - booking.booking_date
+        if exp_time > timedelta(minutes=3):
+            with transaction.atomic():
+
+                for slot in booking.booking_slots.all():
+                    slot.timeslot.release_slot()
+                
+                booking.booking_status = 'failed'
+                booking.save()
+
+                return Response({"error" : "Payment failed, pays with in 3 minute after booking"}, status=status.HTTP_400_BAD_REQUEST)
         
         serializer = PaymentVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -417,7 +515,7 @@ class PaymentVerifyView(APIView):
         method = serializer.validated_data['payment_methods']
 
         if Payment.objects.filter(transaction_hash=txn_hash).exists():
-            return Response("Duplicate transaction hash", status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Duplicate transaction hash."}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             with transaction.atomic():
@@ -429,7 +527,10 @@ class PaymentVerifyView(APIView):
         except Exception as e:
             return Response({"error": f"Transaction failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
+        booking.refresh_from_db()
+
         return Response({
             "message": message,
             "booking": BookingPaymentSerializer(booking).data
         }, status=status.HTTP_200_OK)
+

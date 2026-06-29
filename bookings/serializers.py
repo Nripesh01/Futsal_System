@@ -94,8 +94,8 @@ class GenerateSlotSerializer(serializers.Serializer):
                 attrs['end_date'] = datetime.strptime(end_date_str, '%Y-%m-%d').date()
         
         except ValueError:
-            return serializers.ValidationError({
-                'start_date': f"Invalid format for calendar system '{date_type}'. Please use 'YYYY-MM-DD'."
+            raise serializers.ValidationError({
+                'end_date': f"Invalid format for calendar system '{date_type}'. Please use 'YYYY-MM-DD'."
             })
         
 

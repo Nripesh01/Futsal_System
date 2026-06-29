@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     'accounts.apps.AccountsConfig',
     'bookings.apps.BookingsConfig',
     'rest_framework',
+    'rest_framework_simplejwt.token_blacklist',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -89,26 +90,17 @@ DATABASES = {
 }
 
 
+
+
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES' :(
+    'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
+        'rest_framework.authentication.SessionAuthentication',
+    ]
 }
 
 
 
-from datetime import timedelta
-
-SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
-    'REFRESH_TOKEN_LIFELINE' : timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS' : True,
-    'BLACKLIST_AFTER_ROTATION' : False, # HS256 (HMAC with SHA-256) is a symmetric cryptographic algorithm used to generate a Digital Signature.
-    'SIGNING_KEY' : SECRET_KEY,
-    'AUTH_HEADER_TYPES': ('Bearer',),
-    'USER_ID_FIELD': 'id',
-    'USER_ID_CLAIM': 'user_id',
-}
 
 
 
@@ -147,11 +139,5 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
-
-
-ESEWA_FORM_URL = "https://rc-epay.esewa.com.np/api/epay/main/v2/form"
-ESEWA_SECRET_KEY = "8gBm/:&EnhH.1/q"
-ESEWA_PRODUCT_CODE = "EPAYTEST"
-
 
 AUTH_USER_MODEL = 'accounts.User'

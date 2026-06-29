@@ -1,7 +1,10 @@
 from django.urls import path
 from .views import CourtView, CourtDetailView, TimeSlotListView, CourtSlotGetView, GenerateSlotView
 from .views import BookingListCreateView, CancelIndividualSlotView, CancelFullBookingView, CancellationView
-from .views import PaymentVerifyView
+from .views import PaymentVerifyView, DeleteSlotView
+
+
+
 
 urlpatterns = [
 
@@ -11,6 +14,10 @@ urlpatterns = [
 
     path('slots/', TimeSlotListView.as_view(), name='timeslot-list'),
 
+    path('booking/slots/<int:slot_id>/delete/', DeleteSlotView.as_view(), name='delete-timeslot'),
+
+    path('booking/slots/bulk-delete/', DeleteSlotView.as_view(), name='bulk-delete-timeslot'),
+    
     path('courts/<int:court_id>/slots/', CourtSlotGetView.as_view(), name='court-specific-slots'),
 
     path('courts/<int:court_id>/slots/generate/', GenerateSlotView.as_view(), name='timeslot-generate'),
